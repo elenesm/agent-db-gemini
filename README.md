@@ -1,6 +1,6 @@
 # 🤖 Sistema Agentes IA + MongoDB Atlas
 
-Sistema completo con **Agentes Inteligentes (Claude AI)**, **MongoDB Atlas (NoSQL)**, **documentos JSON** e interfaz conversacional web.
+Sistema completo con **Agentes Inteligentes (Google Gemini)**, **MongoDB Atlas (NoSQL)**, **documentos JSON** e interfaz conversacional web.
 
 ---
 
@@ -29,7 +29,7 @@ proyecto/
 ### 1. Requisitos previos
 - [Node.js](https://nodejs.org) v18 o superior
 - Cuenta en [MongoDB Atlas](https://www.mongodb.com/atlas)
-- API Key de [Anthropic](https://console.anthropic.com)
+- API Key de [Google AI Studio](https://aistudio.google.com/apikey)
 
 ### 2. Abrir en VS Code
 ```bash
@@ -46,7 +46,7 @@ npm install
 Copia `.env.example` como `.env` y llena tus datos:
 ```
 MONGODB_URI=mongodb+srv://usuario:contraseña@cluster0.xxxxx.mongodb.net/sistema_agentes?retryWrites=true&w=majority
-ANTHROPIC_API_KEY=sk-ant-XXXXXXXXXXXXXXXX
+GEMINI_API_KEY=AIzaXXXXXXXXXXXXXXXX
 PORT=3000
 ```
 
@@ -54,7 +54,7 @@ PORT=3000
 1. Ve a [mongodb.com/atlas](https://www.mongodb.com/atlas) → Inicia sesión
 2. Crea un cluster gratuito (M0 - Free)
 3. Ve a **Database Access** → Crea un usuario con contraseña
-4. Ve a **Network Access** → Agrega `0.0.0.0/0` (permitir todas las IPs)
+4. Ve a **Network Access** → Agrega **solo tu IP actual** (botón "Add Current IP Address"). Evita `0.0.0.0/0`: expone tu cluster a todo internet
 5. Ve a **Connect** → **Drivers** → Copia la URI y reemplaza `<password>`
 
 ### 6. Ejecutar el proyecto
@@ -77,7 +77,7 @@ http://localhost:3000
 
 | Módulo | Descripción |
 |--------|------------|
-| 💬 **Chat IA** | Chatbot con Claude AI, historial persistente en MongoDB |
+| 💬 **Chat IA** | Chatbot con Google Gemini, historial persistente en MongoDB |
 | 📄 **Documentos** | CRUD completo de documentos JSON en MongoDB |
 | 🔍 **Búsqueda** | Filtros por categoría y búsqueda de texto |
 | 📊 **Agente** | El agente puede analizar y ayudar con tus datos |
@@ -134,4 +134,4 @@ http://localhost:3000
 - Revisa usuario y contraseña en la URI
 
 **Error de API Key:**
-- Verifica que tu `ANTHROPIC_API_KEY` sea válida en [console.anthropic.com](https://console.anthropic.com)
+- Verifica que tu `GEMINI_API_KEY` sea válida en [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
