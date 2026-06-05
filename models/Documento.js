@@ -19,4 +19,9 @@ DocumentoSchema.pre('save', function(next) {
 // Índice de texto para búsquedas
 DocumentoSchema.index({ titulo: 'text', tags: 'text', categoria: 'text' });
 
+// Índices para filtros y ordenamientos frecuentes
+DocumentoSchema.index({ categoria: 1 });
+DocumentoSchema.index({ creadoEn: -1 });
+DocumentoSchema.index({ actualizadoEn: -1 });
+
 module.exports = mongoose.model('Documento', DocumentoSchema);

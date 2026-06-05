@@ -691,6 +691,11 @@ const COLORES = [
   'linear-gradient(90deg,#bd93f9,#6a00ff)',
 ];
 
+// ── SEGURIDAD: escapar HTML antes de insertar en el DOM (previene XSS) ───────
+function esc(v){
+  return String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
 // ── TABS ──────────────────────────────────────────────────────────────────────
 function switchTab(tab) {
   const tabs = document.querySelectorAll('.tab');
@@ -715,7 +720,7 @@ async function enviarMensaje(){
   const input = document.getElementById('chat-input');
   const texto = input.value.trim();
   if(!texto) return;
-  agregarMsg('user', texto);
+  agregarMsg('user', esc(texto));
   input.value=''; input.style.height='auto';
   const btn = document.getElementById('send-btn');
   btn.disabled=true;
@@ -725,7 +730,7 @@ async function enviarMensaje(){
     const r = await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mensaje:texto,conversacionId:convActualId})});
     const d = await r.json();
     document.getElementById(tid)?.remove();
-    if(d.error){ agregarMsg('agent','❌ '+d.error); }
+    if(d.error){ agregarMsg('agent','❌ '+esc(d.error)); }
     else{
       convActualId = d.conversacionId;
       let extras = '';
@@ -733,7 +738,7 @@ async function enviarMensaje(){
         const nombres = {buscar_documentos:'🔍 Búsqueda',crear_documento:'📝 Creado',analizar_datos:'📊 Análisis',eliminar_documento:'🗑️ Eliminado'};
         extras = `<div class="acciones-badge">${d.acciones.map(a=>`<span class="badge badge-tool">${nombres[a.herramienta]||a.herramienta}</span>`).join('')}<span class="badge badge-ok">✓ Ejecutado</span></div>`;
       }
-      agregarMsg('agent', d.respuesta.replace(/\n/g,'<br>') + extras);
+      agregarMsg('agent', esc(d.respuesta).replace(/\n/g,'<br>') + extras);
       cargarHistorial();
     }
   }catch(e){ document.getElementById(tid)?.remove(); agregarMsg('agent','❌ Error de conexión.'); }
@@ -752,7 +757,7 @@ async function cargarHistorial(){
     const d=await(await fetch('/api/chat/historial')).json();
     const lista=document.getElementById('historial-lista');
     if(!d.length){ lista.innerHTML=`<div class="empty-state" style="padding:16px;font-size:.75rem">Sin conversaciones</div>`; return; }
-    lista.innerHTML=d.map(c=>`<div class="historial-item${c._id===convActualId?' active':''}" onclick="cargarConv('${c._id}')">${c.titulo||'Sin título'}</div>`).join('');
+    lista.innerHTML=d.map(c=>`<div class="historial-item${c._id===convActualId?' active':''}" onclick="cargarConv('${esc(c._id)}')">${esc(c.titulo||'Sin título')}</div>`).join('');
   }catch(e){}
 }
 
@@ -761,7 +766,7 @@ async function cargarConv(id){
     const d=await(await fetch('/api/chat/historial/'+id)).json();
     convActualId=id;
     const msgs=document.getElementById('chat-messages');
-    msgs.innerHTML=d.mensajes.map(m=>`<div class="mensaje ${m.rol==='user'?'user':'agent'}"><div class="avatar ${m.rol==='user'?'user':'agent'}">${m.rol==='user'?'👤':'🤖'}</div><div class="burbuja">${m.contenido.replace(/\n/g,'<br>')}</div></div>`).join('');
+    msgs.innerHTML=d.mensajes.map(m=>`<div class="mensaje ${m.rol==='user'?'user':'agent'}"><div class="avatar ${m.rol==='user'?'user':'agent'}">${m.rol==='user'?'👤':'🤖'}</div><div class="burbuja">${esc(m.contenido).replace(/\n/g,'<br>')}</div></div>`).join('');
     msgs.scrollTop=msgs.scrollHeight;
     switchTab('chat');
     cargarHistorial();
@@ -779,10 +784,10 @@ async function cargarDocumentos(){
     if(!d.documentos?.length){ grid.innerHTML=`<div class="empty-state"><div class="empty-icon">📭</div>Sin documentos</div>`; return; }
     grid.innerHTML=d.documentos.map(doc=>`
       <div class="doc-card">
-        <h3>${doc.titulo}</h3>
-        <span class="doc-cat">${doc.categoria}</span>
-        ${doc.tags?.length?`<div style="font-size:.68rem;color:var(--text-dim)">${doc.tags.map(t=>'#'+t).join(' ')}</div>`:''}
-        <div class="doc-json">${JSON.stringify(doc.contenido,null,2)}</div>
+        <h3>${esc(doc.titulo)}</h3>
+        <span class="doc-cat">${esc(doc.categoria)}</span>
+        ${doc.tags?.length?`<div style="font-size:.68rem;color:var(--text-dim)">${doc.tags.map(t=>'#'+esc(t)).join(' ')}</div>`:''}
+        <div class="doc-json">${esc(JSON.stringify(doc.contenido,null,2))}</div>
         <div class="doc-fecha">📅 ${new Date(doc.actualizadoEn).toLocaleDateString('es-MX')}</div>
         <div class="doc-actions">
           <button class="btn btn-primary" style="font-size:.72rem;padding:5px 10px" onclick="editarDoc('${doc._id}')">✏️ Editar</button>
@@ -851,7 +856,7 @@ function renderBarras(containerId, data, max, colorIdx=0){
   if(!data.length){ el.innerHTML=`<div style="color:var(--text-dim);font-size:.8rem">Sin datos</div>`; return; }
   el.innerHTML = data.map((d,i)=>`
     <div class="bar-row">
-      <div class="bar-label">${d.label}</div>
+      <div class="bar-label">${esc(d.label)}</div>
       <div class="bar-track">
         <div class="bar-fill" style="width:${Math.round((d.val/max)*100)}%;background:${COLORES[i%COLORES.length]}">
           <span class="bar-val">${d.val}</span>
@@ -904,7 +909,7 @@ async function busquedaAvanzada(){
     const d=await(await fetch('/api/analisis/busqueda-avanzada?'+params)).json();
     const out=document.getElementById('busq-resultado');
     if(!d.documentos?.length){ out.innerHTML=`<div class="empty-state" style="padding:20px;grid-column:1/-1"><div class="empty-icon">🔍</div>Sin resultados</div>`; return; }
-    out.innerHTML=d.documentos.map(doc=>`<div class="mini-card"><strong>${doc.titulo}</strong><span style="color:var(--c1);font-size:.68rem">${doc.categoria}</span><br><span style="color:var(--text-dim);font-size:.68rem">${new Date(doc.creadoEn).toLocaleDateString('es-MX')}</span></div>`).join('');
+    out.innerHTML=d.documentos.map(doc=>`<div class="mini-card"><strong>${esc(doc.titulo)}</strong><span style="color:var(--c1);font-size:.68rem">${esc(doc.categoria)}</span><br><span style="color:var(--text-dim);font-size:.68rem">${new Date(doc.creadoEn).toLocaleDateString('es-MX')}</span></div>`).join('');
   }catch(e){ toast('❌ Error en búsqueda'); }
 }
 

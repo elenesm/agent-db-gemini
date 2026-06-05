@@ -3,8 +3,15 @@ const router = express.Router();
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const Conversacion = require('../models/Conversacion');
 const Documento = require('../models/Documento');
+const { escaparRegex } = require('../utils/sanitizar');
+const { esquemaChat } = require('../utils/esquemas');
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
+const MODELO_GEMINI = 'gemini-2.5-flash';
+const MAX_ITERACIONES_AGENTE = 5;
+const MAX_MENSAJES_HISTORIAL = 20;
+const LIMITE_BUSQUEDA_DEFAULT = 5;
 
 // ─── HERRAMIENTAS QUE EL AGENTE PUEDE USAR ───────────────────────────────────
 const tools = [
@@ -68,78 +75,96 @@ const tools = [
 // ─── EJECUTAR HERRAMIENTA ────────────────────────────────────────────────────
 async function ejecutarHerramienta(nombre, input) {
   switch (nombre) {
-    case 'buscar_documentos': {
-      const filtro = {};
-      if (input.categoria) filtro.categoria = input.categoria;
-      if (input.buscar) filtro.$or = [
-        { titulo:    { $regex: input.buscar, $options: 'i' } },
-        { categoria: { $regex: input.buscar, $options: 'i' } },
-        { tags:      { $in: [new RegExp(input.buscar, 'i')] } }
-      ];
-      const docs  = await Documento.find(filtro).limit(input.limite || 5).sort({ actualizadoEn: -1 });
-      const total = await Documento.countDocuments(filtro);
-      return {
-        total,
-        documentos: docs.map(d => ({
-          id: d._id, titulo: d.titulo, categoria: d.categoria,
-          tags: d.tags, contenido: d.contenido, fecha: d.actualizadoEn
-        }))
-      };
-    }
-    case 'crear_documento': {
-      let contenidoObj;
-      try { contenidoObj = typeof input.contenido === 'string' ? JSON.parse(input.contenido) : input.contenido; }
-      catch { contenidoObj = { texto: input.contenido }; }
-
-      const tagsArr = input.tags
-        ? (Array.isArray(input.tags) ? input.tags : input.tags.split(',').map(t => t.trim()))
-        : [];
-
-      const doc = new Documento({
-        titulo: input.titulo,
-        contenido: contenidoObj,
-        categoria: input.categoria || 'general',
-        tags: tagsArr
-      });
-      await doc.save();
-      return { exito: true, id: doc._id, mensaje: `Documento "${input.titulo}" creado exitosamente` };
-    }
-    case 'analizar_datos': {
-      if (input.tipo === 'por_categoria') {
-        const stats = await Documento.aggregate([
-          { $group: { _id: '$categoria', total: { $sum: 1 } } },
-          { $sort: { total: -1 } }
-        ]);
-        return { tipo: 'por_categoria', datos: stats };
-      }
-      if (input.tipo === 'total') {
-        const total = await Documento.countDocuments();
-        return { tipo: 'total', total };
-      }
-      if (input.tipo === 'recientes') {
-        const docs = await Documento.find().sort({ creadoEn: -1 }).limit(5).select('titulo categoria creadoEn');
-        return { tipo: 'recientes', documentos: docs };
-      }
-      if (input.tipo === 'por_tags') {
-        const stats = await Documento.aggregate([
-          { $unwind: '$tags' },
-          { $group: { _id: '$tags', total: { $sum: 1 } } },
-          { $sort: { total: -1 } },
-          { $limit: 10 }
-        ]);
-        return { tipo: 'por_tags', datos: stats };
-      }
-      // Cambia esto en tu código:
-    const model = genAI.getGenerativeModel({
-      model: "gemini-3.5-flash",
-      systemInstruction: SYSTEM_PROMPT,
-      tools: tools // O simplemente pasar: tools: [{ functionDeclarations: tools[0].functionDeclarations }]
-    });
-      return { exito: true, mensaje: `Documento "${doc.titulo}" eliminado` };
-    }
+    case 'buscar_documentos':
+      return buscarDocumentos(input);
+    case 'crear_documento':
+      return crearDocumento(input);
+    case 'analizar_datos':
+      return analizarDatos(input);
+    case 'eliminar_documento':
+      return eliminarDocumento(input);
     default:
       return { error: 'Herramienta desconocida' };
   }
+}
+
+async function buscarDocumentos(input) {
+  const filtro = {};
+  if (input.categoria) filtro.categoria = input.categoria;
+  if (input.buscar) {
+    const seguro = escaparRegex(input.buscar);
+    filtro.$or = [
+      { titulo:    { $regex: seguro, $options: 'i' } },
+      { categoria: { $regex: seguro, $options: 'i' } },
+      { tags:      { $in: [new RegExp(seguro, 'i')] } }
+    ];
+  }
+  const limite = Math.min(Number(input.limite) || LIMITE_BUSQUEDA_DEFAULT, 20);
+  const docs  = await Documento.find(filtro).limit(limite).sort({ actualizadoEn: -1 });
+  const total = await Documento.countDocuments(filtro);
+  return {
+    total,
+    documentos: docs.map(d => ({
+      id: d._id, titulo: d.titulo, categoria: d.categoria,
+      tags: d.tags, contenido: d.contenido, fecha: d.actualizadoEn
+    }))
+  };
+}
+
+async function crearDocumento(input) {
+  let contenidoObj;
+  try { contenidoObj = typeof input.contenido === 'string' ? JSON.parse(input.contenido) : input.contenido; }
+  catch { contenidoObj = { texto: input.contenido }; }
+
+  const tagsArr = input.tags
+    ? (Array.isArray(input.tags) ? input.tags : input.tags.split(',').map(t => t.trim()))
+    : [];
+
+  const doc = new Documento({
+    titulo: input.titulo,
+    contenido: contenidoObj,
+    categoria: input.categoria || 'general',
+    tags: tagsArr
+  });
+  await doc.save();
+  return { exito: true, id: doc._id, mensaje: `Documento "${input.titulo}" creado exitosamente` };
+}
+
+async function analizarDatos(input) {
+  if (input.tipo === 'por_categoria') {
+    const stats = await Documento.aggregate([
+      { $group: { _id: '$categoria', total: { $sum: 1 } } },
+      { $sort: { total: -1 } }
+    ]);
+    return { tipo: 'por_categoria', datos: stats };
+  }
+  if (input.tipo === 'total') {
+    const total = await Documento.countDocuments();
+    return { tipo: 'total', total };
+  }
+  if (input.tipo === 'recientes') {
+    const docs = await Documento.find().sort({ creadoEn: -1 }).limit(5).select('titulo categoria creadoEn');
+    return { tipo: 'recientes', documentos: docs };
+  }
+  if (input.tipo === 'por_tags') {
+    const stats = await Documento.aggregate([
+      { $unwind: '$tags' },
+      { $group: { _id: '$tags', total: { $sum: 1 } } },
+      { $sort: { total: -1 } },
+      { $limit: 10 }
+    ]);
+    return { tipo: 'por_tags', datos: stats };
+  }
+  return { error: `Tipo de análisis desconocido: ${input.tipo}` };
+}
+
+async function eliminarDocumento(input) {
+  if (!/^[a-f\d]{24}$/i.test(String(input.id || ''))) {
+    return { error: 'ID de documento inválido' };
+  }
+  const doc = await Documento.findByIdAndDelete(input.id);
+  if (!doc) return { error: 'Documento no encontrado' };
+  return { exito: true, mensaje: `Documento "${doc.titulo}" eliminado` };
 }
 
 // ─── SYSTEM PROMPT ────────────────────────────────────────────────────────────
@@ -162,8 +187,11 @@ COMPORTAMIENTO:
 // ─── POST /api/chat ───────────────────────────────────────────────────────────
 router.post('/', async (req, res) => {
   try {
-    const { mensaje, conversacionId } = req.body;
-    if (!mensaje) return res.status(400).json({ error: 'Mensaje requerido' });
+    const validacion = esquemaChat.safeParse(req.body);
+    if (!validacion.success) {
+      return res.status(400).json({ error: 'Mensaje inválido', detalles: validacion.error.issues.map(i => i.message) });
+    }
+    const { mensaje, conversacionId } = validacion.data;
 
     // Cargar o crear conversación
     let conversacion;
@@ -172,41 +200,37 @@ router.post('/', async (req, res) => {
 
     conversacion.mensajes.push({ rol: 'user', contenido: mensaje });
 
-    // Construir historial en formato Gemini
-    const historial = conversacion.mensajes.slice(0, -1).map(m => ({
-      role:  m.rol === 'user' ? 'user' : 'model',
-      parts: [{ text: m.contenido }]
-    }));
+    // Construir historial en formato Gemini (acotado para no crecer sin límite)
+    const historial = conversacion.mensajes
+      .slice(-MAX_MENSAJES_HISTORIAL, -1)
+      .map(m => ({
+        role:  m.rol === 'user' ? 'user' : 'model',
+        parts: [{ text: m.contenido }]
+      }));
 
-   const model = genAI.getGenerativeModel({
-      model: "gemini-3.5-flash",
+    const model = genAI.getGenerativeModel({
+      model: MODELO_GEMINI,
       systemInstruction: SYSTEM_PROMPT,
       tools: [{ functionDeclarations: tools[0].functionDeclarations }]
     });
 
     const chat = model.startChat({ history: historial });
 
-    // ─── Agentic loop ────────────────────────────────────────────────────────
+    // ─── Loop agéntico ───────────────────────────────────────────────────────
+    // Cada iteración: el modelo responde texto (fin) o pide herramientas;
+    // se ejecutan y sus resultados se envían UNA sola vez en el siguiente turno.
     let textoFinal = '';
     const accionesEjecutadas = [];
-    let iteraciones = 0;
-    let inputActual = mensaje;
+    let respuesta = await chat.sendMessage(mensaje);
 
-    while (iteraciones < 5) {
-      iteraciones++;
-      const resultado = await chat.sendMessage(inputActual);
-      const response  = resultado.response;
-
-      // ¿Hay function calls?
-      const calls = response.functionCalls();
+    for (let i = 0; i < MAX_ITERACIONES_AGENTE; i++) {
+      const calls = respuesta.response.functionCalls();
 
       if (!calls || calls.length === 0) {
-        // Sin herramientas → respuesta final
-        textoFinal = response.text();
+        textoFinal = respuesta.response.text();
         break;
       }
 
-      // Ejecutar cada herramienta y acumular resultados
       const functionResponses = [];
       for (const call of calls) {
         const resultadoHerramienta = await ejecutarHerramienta(call.name, call.args);
@@ -223,17 +247,11 @@ router.post('/', async (req, res) => {
         });
       }
 
-      // Devolver resultados a Gemini y continuar el loop
-      const siguienteRespuesta = await chat.sendMessage(functionResponses);
-      const siguienteCalls     = siguienteRespuesta.response.functionCalls();
+      respuesta = await chat.sendMessage(functionResponses);
+    }
 
-      if (!siguienteCalls || siguienteCalls.length === 0) {
-        textoFinal = siguienteRespuesta.response.text();
-        break;
-      }
-
-      // Si sigue llamando herramientas, preparar para la siguiente iteración
-      inputActual = functionResponses;
+    if (!textoFinal) {
+      textoFinal = 'Alcancé el límite de pasos para esta solicitud. Intenta dividirla en partes más pequeñas.';
     }
 
     // Guardar respuesta en historial
@@ -248,8 +266,8 @@ router.post('/', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error en chat DETALLE:', error.message, error.stack);
-    res.status(500).json({ error: 'Error procesando el mensaje', detalle: error.message });
+    console.error('Error en chat:', error.message, error.stack);
+    res.status(500).json({ error: 'Error procesando el mensaje' });
   }
 });
 
@@ -261,7 +279,10 @@ router.get('/historial', async (req, res) => {
       .sort({ actualizadaEn: -1 })
       .limit(20);
     res.json(convs);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (error) {
+    console.error('Error listando historial:', error.message);
+    res.status(500).json({ error: 'Error al obtener el historial' });
+  }
 });
 
 router.get('/historial/:id', async (req, res) => {
@@ -269,14 +290,20 @@ router.get('/historial/:id', async (req, res) => {
     const c = await Conversacion.findById(req.params.id);
     if (!c) return res.status(404).json({ error: 'No encontrada' });
     res.json(c);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (error) {
+    console.error('Error obteniendo conversación:', error.message);
+    res.status(500).json({ error: 'Error al obtener la conversación' });
+  }
 });
 
 router.delete('/:id', async (req, res) => {
   try {
     await Conversacion.findByIdAndDelete(req.params.id);
     res.json({ mensaje: 'Eliminada' });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (error) {
+    console.error('Error eliminando conversación:', error.message);
+    res.status(500).json({ error: 'Error al eliminar la conversación' });
+  }
 });
 
 module.exports = router;
