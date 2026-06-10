@@ -1,67 +1,76 @@
 const express = require('express');
 const router = express.Router();
-const { GoogleGenerativeAI } = require('@google/generative-ai');
 const Conversacion = require('../models/Conversacion');
 const Documento = require('../models/Documento');
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
+const GROQ_MODEL = 'llama-3.3-70b-versatile';
 
 // ─── HERRAMIENTAS QUE EL AGENTE PUEDE USAR ───────────────────────────────────
 const tools = [
   {
-    functionDeclarations: [
-      {
-        name: 'buscar_documentos',
-        description: 'Busca documentos en MongoDB. Úsala cuando el usuario quiera ver, listar o buscar documentos.',
-        parameters: {
-          type: 'OBJECT',
-          properties: {
-            buscar:    { type: 'STRING',  description: 'Texto a buscar (opcional)' },
-            categoria: { type: 'STRING',  description: 'Filtrar por categoría (opcional)' },
-            limite:    { type: 'NUMBER',  description: 'Máximo de resultados (default 5)' }
-          }
-        }
-      },
-      {
-        name: 'crear_documento',
-        description: 'Crea un nuevo documento JSON en MongoDB. Úsala cuando el usuario quiera guardar o registrar datos.',
-        parameters: {
-          type: 'OBJECT',
-          properties: {
-            titulo:    { type: 'STRING',  description: 'Título del documento' },
-            contenido: { type: 'STRING',  description: 'Contenido del documento en formato JSON string' },
-            categoria: { type: 'STRING',  description: 'Categoría del documento' },
-            tags:      { type: 'STRING',  description: 'Tags separados por coma (opcional)' }
-          },
-          required: ['titulo', 'contenido']
-        }
-      },
-      {
-        name: 'analizar_datos',
-        description: 'Analiza y genera estadísticas de los documentos en MongoDB. Úsala para preguntas de análisis, totales, agrupaciones.',
-        parameters: {
-          type: 'OBJECT',
-          properties: {
-            tipo: {
-              type: 'STRING',
-              description: 'Tipo de análisis: por_categoria | recientes | total | por_tags'
-            }
-          },
-          required: ['tipo']
-        }
-      },
-      {
-        name: 'eliminar_documento',
-        description: 'Elimina un documento por su ID. Úsala solo si el usuario confirma querer eliminar.',
-        parameters: {
-          type: 'OBJECT',
-          properties: {
-            id: { type: 'STRING', description: 'ID del documento a eliminar' }
-          },
-          required: ['id']
+    type: 'function',
+    function: {
+      name: 'buscar_documentos',
+      description: 'Busca documentos en MongoDB. Úsala cuando el usuario quiera ver, listar o buscar documentos o productos. Por defecto excluye registros de ventas; si el usuario pregunta por ventas, pasa categoria "ventas".',
+      parameters: {
+        type: 'object',
+        properties: {
+          buscar:    { type: 'string', description: 'Palabras clave a buscar, ej: "playera negra" (opcional)' },
+          categoria: { type: 'string', description: 'Filtrar por categoría exacta, ej: inventario, ventas (opcional)' },
+          limite:    { type: 'number', description: 'Máximo de resultados (default 10)' }
         }
       }
-    ]
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'crear_documento',
+      description: 'Crea un nuevo documento JSON en MongoDB. Úsala cuando el usuario quiera guardar o registrar datos.',
+      parameters: {
+        type: 'object',
+        properties: {
+          titulo:    { type: 'string', description: 'Título del documento' },
+          contenido: { type: 'string', description: 'Contenido del documento en formato JSON string' },
+          categoria: { type: 'string', description: 'Categoría del documento (inventario, ventas, clientes, proveedores)' },
+          tags:      { type: 'string', description: 'Tags separados por coma (opcional)' }
+        },
+        required: ['titulo', 'contenido']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'analizar_datos',
+      description: 'Analiza y genera estadísticas de los documentos en MongoDB. Úsala para preguntas de análisis, totales, agrupaciones.',
+      parameters: {
+        type: 'object',
+        properties: {
+          tipo: {
+            type: 'string',
+            enum: ['por_categoria', 'recientes', 'total', 'por_tags'],
+            description: 'Tipo de análisis'
+          }
+        },
+        required: ['tipo']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'eliminar_documento',
+      description: 'Elimina un documento por su ID. Úsala solo si el usuario confirma querer eliminar.',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'ID del documento a eliminar' }
+        },
+        required: ['id']
+      }
+    }
   }
 ];
 
@@ -70,13 +79,30 @@ async function ejecutarHerramienta(nombre, input) {
   switch (nombre) {
     case 'buscar_documentos': {
       const filtro = {};
-      if (input.categoria) filtro.categoria = input.categoria;
-      if (input.buscar) filtro.$or = [
-        { titulo:    { $regex: input.buscar, $options: 'i' } },
-        { categoria: { $regex: input.buscar, $options: 'i' } },
-        { tags:      { $in: [new RegExp(input.buscar, 'i')] } }
-      ];
-      const docs  = await Documento.find(filtro).limit(input.limite || 5).sort({ actualizadoEn: -1 });
+      // Sin categoría explícita, excluye ventas: las búsquedas de productos son sobre el catálogo
+      filtro.categoria = input.categoria ? input.categoria : { $ne: 'ventas' };
+      if (input.buscar) {
+        // Busca por palabras sueltas: basta con que alguna coincida en algún campo
+        const stopwords = new Set(['para', 'con', 'sin', 'una', 'uno', 'unas', 'unos', 'las', 'los', 'del', 'que', 'por', 'tipo', 'quiero', 'busco', 'tienes', 'hay']);
+        const palabras = input.buscar.trim().toLowerCase().split(/\s+/)
+          .filter(p => p.length >= 3 && !stopwords.has(p));
+        const condiciones = palabras.map(p => {
+          // tolera diferencias de género/número al final de la palabra (negra/negro/negras)
+          const raiz = p.length > 4 ? p.slice(0, -2) : p;
+          const rx = new RegExp(raiz.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+          return [
+            { titulo:    rx },
+            { categoria: rx },
+            { tags:      { $in: [rx] } },
+            { 'contenido.producto': rx },
+            { 'contenido.marca':    rx },
+            { 'contenido.color':    rx },
+            { 'contenido.modelo':   rx }
+          ];
+        }).flat();
+        if (condiciones.length > 0) filtro.$or = condiciones;
+      }
+      const docs  = await Documento.find(filtro).limit(input.limite || 10).sort({ actualizadoEn: -1 });
       const total = await Documento.countDocuments(filtro);
       return {
         total,
@@ -129,12 +155,11 @@ async function ejecutarHerramienta(nombre, input) {
         ]);
         return { tipo: 'por_tags', datos: stats };
       }
-      // Cambia esto en tu código:
-    const model = genAI.getGenerativeModel({
-      model: "gemini-3.5-flash",
-      systemInstruction: SYSTEM_PROMPT,
-      tools: tools // O simplemente pasar: tools: [{ functionDeclarations: tools[0].functionDeclarations }]
-    });
+      return { error: 'Tipo de análisis desconocido' };
+    }
+    case 'eliminar_documento': {
+      const doc = await Documento.findByIdAndDelete(input.id);
+      if (!doc) return { error: 'Documento no encontrado' };
       return { exito: true, mensaje: `Documento "${doc.titulo}" eliminado` };
     }
     default:
@@ -143,13 +168,18 @@ async function ejecutarHerramienta(nombre, input) {
 }
 
 // ─── SYSTEM PROMPT ────────────────────────────────────────────────────────────
-const SYSTEM_PROMPT = `Eres un agente inteligente experto en gestión y análisis de datos con MongoDB.
+const SYSTEM_PROMPT = `Eres el asistente inteligente de una tienda de ropa deportiva. Gestionas su información (productos, inventario, ventas, clientes) almacenada en MongoDB.
 
 Tienes acceso a herramientas reales para interactuar con la base de datos:
 - buscar_documentos: busca y lista documentos
 - crear_documento: guarda nuevos datos
 - analizar_datos: genera estadísticas y análisis
 - eliminar_documento: elimina documentos (pide confirmación antes)
+
+CONTEXTO DEL NEGOCIO:
+- Es una tienda de ropa deportiva: maneja productos (playeras, shorts, tenis, sudaderas, etc.), tallas, marcas, precios, inventario y ventas
+- Al registrar productos usa categorías útiles como: inventario, ventas, clientes, proveedores
+- Incluye en el contenido datos relevantes: producto, marca, talla, color, cantidad, precio
 
 COMPORTAMIENTO:
 - Si el usuario pide ver datos → usa buscar_documentos
@@ -158,6 +188,40 @@ COMPORTAMIENTO:
 - Sé proactivo: si el usuario dice "analiza mis datos" usa múltiples herramientas
 - Responde siempre en español, de forma clara y estructurada
 - Muestra los resultados de forma legible, nunca como JSON crudo`;
+
+// ─── LLAMADA A GROQ (con reintento ante errores temporales) ──────────────────
+async function llamarGroq(messages, intentos = 3) {
+  for (let i = 0; i < intentos; i++) {
+    const res = await fetch(GROQ_URL, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: GROQ_MODEL,
+        messages,
+        tools,
+        tool_choice: 'auto',
+        temperature: 0.3
+      })
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      return data.choices[0].message;
+    }
+
+    const errorTexto = await res.text();
+    if ((res.status === 429 || res.status === 503) && i < intentos - 1) {
+      const espera = 5000 * (i + 1);
+      console.log(`⏳ Groq saturado (${res.status}), reintentando en ${espera / 1000}s...`);
+      await new Promise(r => setTimeout(r, espera));
+      continue;
+    }
+    throw new Error(`Groq ${res.status}: ${errorTexto.slice(0, 300)}`);
+  }
+}
 
 // ─── POST /api/chat ───────────────────────────────────────────────────────────
 router.post('/', async (req, res) => {
@@ -172,69 +236,47 @@ router.post('/', async (req, res) => {
 
     conversacion.mensajes.push({ rol: 'user', contenido: mensaje });
 
-    // Construir historial en formato Gemini
-    const historial = conversacion.mensajes.slice(0, -1).map(m => ({
-      role:  m.rol === 'user' ? 'user' : 'model',
-      parts: [{ text: m.contenido }]
-    }));
-
-   const model = genAI.getGenerativeModel({
-      model: "gemini-3.5-flash",
-      systemInstruction: SYSTEM_PROMPT,
-      tools: [{ functionDeclarations: tools[0].functionDeclarations }]
-    });
-
-    const chat = model.startChat({ history: historial });
+    // Construir historial en formato OpenAI/Groq
+    const messages = [
+      { role: 'system', content: SYSTEM_PROMPT },
+      ...conversacion.mensajes.map(m => ({
+        role: m.rol === 'user' ? 'user' : 'assistant',
+        content: m.contenido
+      }))
+    ];
 
     // ─── Agentic loop ────────────────────────────────────────────────────────
     let textoFinal = '';
     const accionesEjecutadas = [];
-    let iteraciones = 0;
-    let inputActual = mensaje;
 
-    while (iteraciones < 5) {
-      iteraciones++;
-      const resultado = await chat.sendMessage(inputActual);
-      const response  = resultado.response;
+    for (let i = 0; i < 5; i++) {
+      const respuesta = await llamarGroq(messages);
 
-      // ¿Hay function calls?
-      const calls = response.functionCalls();
-
-      if (!calls || calls.length === 0) {
-        // Sin herramientas → respuesta final
-        textoFinal = response.text();
+      if (!respuesta.tool_calls || respuesta.tool_calls.length === 0) {
+        textoFinal = respuesta.content || '';
         break;
       }
 
-      // Ejecutar cada herramienta y acumular resultados
-      const functionResponses = [];
-      for (const call of calls) {
-        const resultadoHerramienta = await ejecutarHerramienta(call.name, call.args);
+      // Ejecutar cada herramienta y devolver los resultados al modelo
+      messages.push(respuesta);
+      for (const call of respuesta.tool_calls) {
+        let args = {};
+        try { args = JSON.parse(call.function.arguments); } catch {}
+        const resultadoHerramienta = await ejecutarHerramienta(call.function.name, args);
         accionesEjecutadas.push({
-          herramienta: call.name,
-          input:       call.args,
+          herramienta: call.function.name,
+          input:       args,
           resultado:   resultadoHerramienta
         });
-        functionResponses.push({
-          functionResponse: {
-            name:     call.name,
-            response: resultadoHerramienta
-          }
+        messages.push({
+          role: 'tool',
+          tool_call_id: call.id,
+          content: JSON.stringify(resultadoHerramienta)
         });
       }
-
-      // Devolver resultados a Gemini y continuar el loop
-      const siguienteRespuesta = await chat.sendMessage(functionResponses);
-      const siguienteCalls     = siguienteRespuesta.response.functionCalls();
-
-      if (!siguienteCalls || siguienteCalls.length === 0) {
-        textoFinal = siguienteRespuesta.response.text();
-        break;
-      }
-
-      // Si sigue llamando herramientas, preparar para la siguiente iteración
-      inputActual = functionResponses;
     }
+
+    if (!textoFinal) textoFinal = 'No pude generar una respuesta, intenta de nuevo.';
 
     // Guardar respuesta en historial
     conversacion.mensajes.push({ rol: 'assistant', contenido: textoFinal });
